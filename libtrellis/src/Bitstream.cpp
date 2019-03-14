@@ -108,17 +108,17 @@ public:
         uint8_t udata;
 
         //
-        // Every byte can be encoded by on of 4 cases
+        // Every byte can be encoded by one of 4 cases
         // It's a prefix-free code so we can identify each one just by looking at the first bits:
         // 0 -> Byte zero (0000 0000)
-        // 100 xxx -> Stored byte in compression_dict, xxx is the index (0-7)
-        // 101 xxx -> Byte with a single bit set, xxx is the index of the set bit (0 is lsb, 7 is msb)
+        // 100 xxx -> Byte with a single bit set, xxx is the index of the set bit (0 is lsb, 7 is msb)
+        // 101 xxx -> Stored byte in compression_dict, xxx is the index (0-7)
         // 11 xxxxxxxx -> Literal byte, xxxxxxxx is the encoded byte
         //
         for (size_t i = 0; i < count; i++) {
             // Make sure we have at least one bit in the buffer
             if (!remaining_bits) {
-                read_data = (uint32_t) get_byte();
+                read_data = uint32_t(get_byte());
                 remaining_bits = 8;
             }
             next_bit = bool(read_data >> (remaining_bits-1) & 1);
@@ -130,7 +130,7 @@ public:
                 // For each of the 3 remaining cases we will need at least 5 more bits,
                 // so if we have less than that it's ok to read another byte
                 if (remaining_bits < 5) {
-                    read_data = (read_data << 8) | ((uint32_t) get_byte());
+                    read_data = (read_data << 8) | uint32_t(get_byte());
                     remaining_bits += 8;
                 }
                 next_bit = bool(read_data >> (remaining_bits-1) & 1);
@@ -140,7 +140,7 @@ public:
                     // 11 xxxx xxxx: Literal byte, just read the next 8 bits & use that
                     // we consumed 10 bits total
                     if (remaining_bits < 8) {
-                        read_data = (read_data << 8) | ((uint32_t) get_byte());
+                        read_data = (read_data << 8) | uint32_t(get_byte());
                         remaining_bits += 8;
                     }
                     udata = uint8_t((read_data >> (remaining_bits - 8)) & 0xff);
@@ -151,7 +151,7 @@ public:
                     // We already have all the bits we need buffered
                     next_bit = bool(read_data >> (remaining_bits-1) & 1);
                     remaining_bits--;
-                    size_t idx = (size_t) ((read_data >> (remaining_bits-3)) & 0x7);
+                    size_t idx = size_t((read_data >> (remaining_bits-3)) & 0x7);
                     remaining_bits -= 3;
                     if (next_bit) {
                         // 101 xxx: Stored byte.  Just use xxx as index in the dictionary,
@@ -179,6 +179,100 @@ public:
     void write_bytes(T in, size_t count) {
         for (size_t i = 0; i < count; i++)
             write_byte(*(in++));
+    }
+
+    // Compression Auxiliary functions
+    // aux function to check if a byte has just one bit set
+    // it returns the turned on bit index (0 lsb, 7 msb) or -1
+    // if more (or less than just one bit set)
+    int getBitIndexOrBust(uint8_t b)
+    {
+        if (b == 0)
+            return -1;
+        int cnt;
+        for(cnt = 0; (b & 1) == 0; b >>= 1, cnt++)
+            ;
+        return (b==1)? cnt : -1;
+    }
+
+    // aux function to check if a byte is one of the saved
+    // bytes in the compression dictionary, returns the index
+    // where the byte is or -1 if it's not found
+    int getByteIndexInDictOrBust(uint8_t b, array<uint8_t, 8> compression_dict)
+    {
+        for(int cnt = 0; cnt < 8; cnt++) {
+            if (compression_dict[cnt] == b)
+                return cnt;
+        }
+        return -1;
+    }
+
+    // Compress and Write multiple bytes from an InputIterator and update CRC
+    // The buffer should be left padded with 0 bytes until it's a multiple of
+    // 8 bytes before calling this function.
+    // After compression the necessary number of 0 bits are added to the
+    // right to complete a whole byte
+    // compression dict should be an array of the 8 most common byte pattern
+    // (having more than 1 bit set) among all the frames
+    template<typename T>
+    void write_compressed_bytes(T in, size_t count, array<uint8_t, 8> compression_dict) {
+        assert((count % 8) == 0);
+
+        // buffer of bits to output (we need to gather at least 8 bits
+        // before writing)
+        uint32_t bitBuf = 0;
+        uint8_t readyBits = 0;
+
+        //
+        // Every byte can be encoded by one of 4 cases
+        // It's a prefix-free code so we can identify each one just by looking at the first bits:
+        // 0 -> Byte zero (0000 0000)
+        // 100 xxx -> Byte with a single bit set, xxx is the index of the set bit (0 is lsb, 7 is msb)
+        // 101 xxx -> Stored byte in compression_dict, xxx is the index (0-7)
+        // 11 xxxxxxxx -> Literal byte, xxxxxxxx is the encoded byte
+        //
+        for (size_t i = 0; i < count; i++)
+        {
+            uint8_t inb = *(in++);
+            if (inb == 0) {
+                // 0 -> Byte zero (0000 0000)
+                bitBuf = bitBuf << 1;
+                readyBits++;
+            } else {
+                int idx = getBitIndexOrBust(inb);
+                if (idx >= 0) {
+                    // 101 xxx -> Byte with a single bit set,
+                    // xxx is the index of the set bit (0 is lsb, 7 is msb)
+                    bitBuf = (bitBuf << 6) | (0b100 << 3) | (idx & 0x7);
+                    readyBits += 6;
+                } else {
+                    idx = getByteIndexInDictOrBust(inb, compression_dict);
+                    if (idx >= 0) {
+                        // 101 xxx -> Stored byte in compression_dict, xxx is the index (0-7)
+                        bitBuf = (bitBuf << 6) | (0b101 << 3) | (idx & 0x7);
+                        readyBits += 6;
+                    } else {
+                        // 11 xxxxxxxx -> Literal byte, xxxxxxxx is the encoded byte
+                        bitBuf = (bitBuf << 10) | (0b11 << 8) | inb;
+                        readyBits += 10;
+                    }
+                }
+            }
+
+            // only write a byte when we have 8 bits ready (we may even
+            // have 16 bits ready)
+            while(readyBits >= 8) {
+                write_byte(uint8_t(bitBuf >> (readyBits-8)));
+                // not strictly necessary, but clear the written bits
+                bitBuf &= ~(uint32_t(0xff << (readyBits-8)));
+                readyBits -= 8;
+            }
+        }
+
+        // send remaining bits with 0 bits padding to the right
+        if (readyBits > 0) {
+            write_byte(bitBuf << (8 - readyBits));
+        }
     }
 
     // Skip over bytes while updating CRC
@@ -429,7 +523,7 @@ Chip Bitstream::deserialise_chip(boost::optional<uint32_t> idcode) {
                 bool check_crc = params[0] & 0x80U;
                 // inverted value: a 0 means check after every frame
                 bool crc_after_each_frame = check_crc && !(params[0] & 0x40U);
-                // I don't know what these two are for I've seen both 1s (XO2) and both 0s (ECP5)
+                // I don't know what these two are for. I've seen both 1s (XO2) and both 0s (ECP5)
                 // The names are from the ECP5 docs
                 // bool include_dummy_bits = params[0] & 0x20U;
                 // bool include_dummy_bytes = params[0] & 0x10U;
@@ -438,7 +532,7 @@ Chip Bitstream::deserialise_chip(boost::optional<uint32_t> idcode) {
                 BITSTREAM_NOTE("reading " << std::dec << frame_count << " config frames (with " << std::dec << dummy_bytes << " dummy bytes)");
                 size_t bytes_per_frame = (chip->info.bits_per_frame + chip->info.pad_bits_after_frame +
                                           chip->info.pad_bits_before_frame) / 8U;
-                // If compressed 0 bits are added to the stream before compression to make it 64 bit bounded, so
+                // If compressed, 0 bits are added to the stream before compression to make it 64 bit bounded, so
                 // we should consider that space here but they shouldn't be copied to the output
                 if (cmd == BitstreamCommand::LSC_PROG_INCR_CMP)
                     bytes_per_frame += (7 - ((bytes_per_frame - 1) % 8));
@@ -564,8 +658,61 @@ Bitstream Bitstream::generate_jump(uint32_t address) {
     return Bitstream(wr.get(), std::vector<string>());
 }
 
+
+// This generates and returns the compression dictionary
+// which consists of the 8 most common byte patterns, excluding
+// 0 and the eight bytes that have just one bit set because those
+// 9 cases are covered by special prefix codes
+// we can return a copy of the array as it's only 64 bits
+array<uint8_t, 8> generate_compression_dict(const Chip &chip)
+{
+    array<uint8_t, 8> compression_dict;
+    array<int, 256> appearances; // number of time each byte appears
+    fill_n(appearances.begin(), 256, 0);
+    uint16_t frames = uint16_t(chip.info.num_frames);
+    size_t bytes_per_frame = (chip.info.bits_per_frame + chip.info.pad_bits_after_frame +
+                              chip.info.pad_bits_before_frame) / 8U;
+
+    // no need to pad the frame with zero bytes here (like we do for
+    // compression) because they won't affect the dictionary generation
+    // there's also no need to check to see if frames are reversed or not
+    // We just count how many times each byte pattern appears (in all frames)
+    unique_ptr<uint8_t[]> frame_bytes = make_unique<uint8_t[]>(bytes_per_frame);
+    for (size_t i = 0; i < frames; i++) {
+        fill(frame_bytes.get(), frame_bytes.get() + bytes_per_frame, 0x00);
+        for (int j = 0; j < chip.info.bits_per_frame; j++) {
+            size_t ofs = j + chip.info.pad_bits_after_frame;
+            assert(((bytes_per_frame - 1) - (ofs / 8)) < bytes_per_frame);
+            frame_bytes[(bytes_per_frame - 1) - (ofs / 8)] |=
+                    (chip.cram.bit((chip.info.num_frames - 1) - i, j) & 0x01) << (ofs % 8);
+        }
+        for (unsigned int j = 0; j < bytes_per_frame; j++)
+            appearances[frame_bytes[j]]++;
+    }
+    // Now clear all bit patterns that shouldn't be considered in the dictionary
+    // In extraordinary cases they can remain in the dictionary (if fewer than
+    // 8 different pattern exists, but that's not really a problem)
+    appearances[0] = 0;
+    for(int i = 0; i < 8; i++)
+        appearances[1 << i] = 0;
+
+    // All that remains is selecting the 8 most common bytes
+    for (int i = 0; i < 8; i++) {
+        int maxIdx = 0;
+        // now find max
+        for (int j = 1; j < 256; j++) {
+            if (appearances[j] > appearances[maxIdx])
+                maxIdx = j;
+        }
+        compression_dict[i] = maxIdx;
+        appearances[maxIdx] = 0;  // clear it so the next max can be found
+    }
+    return compression_dict;
+}
+
 Bitstream Bitstream::serialise_chip(const Chip &chip, const map<string, string> options) {
     BitstreamReadWriter wr;
+    boost::optional<array<uint8_t, 8>> compression_dict;
     // Preamble
     wr.write_bytes(preamble.begin(), preamble.size());
     // Padding
@@ -591,6 +738,29 @@ Bitstream Bitstream::serialise_chip(const Chip &chip, const map<string, string> 
     wr.write_byte(uint8_t(BitstreamCommand::VERIFY_ID));
     wr.insert_zeros(3);
     wr.write_uint32(chip.info.idcode);
+
+    bool compress_frames = false;
+
+    if (options.count("compress")) {
+        if (options.at("compress") == "yes")
+            compress_frames = true;
+        else if (options.at("compress") == "no")
+            compress_frames = false;
+        else
+            throw runtime_error("bad compress option " + options.at("compress"));
+    }
+
+    if (compress_frames) {
+        // generate & store the compression dictionary
+        // in the bitstream
+        compression_dict = boost::make_optional(generate_compression_dict(chip));
+        wr.write_byte(uint8_t(BitstreamCommand::LSC_WRITE_COMP_DIC));
+        wr.insert_zeros(3);        // no crc, no other options
+        // write all byte patterns, least common first
+        for (int i = 7; i >= 0; i--)
+            wr.write_byte(compression_dict.get()[i]);
+    }
+
     // Set control reg 0 to 0x40000000
     wr.write_byte(uint8_t(BitstreamCommand::LSC_PROG_CNTRL0));
     wr.insert_zeros(3);
@@ -613,14 +783,20 @@ Bitstream Bitstream::serialise_chip(const Chip &chip, const map<string, string> 
     // Init address
     wr.write_byte(uint8_t(BitstreamCommand::LSC_INIT_ADDRESS));
     wr.insert_zeros(3);
-    // Bitstream data
-    wr.write_byte(uint8_t(BitstreamCommand::LSC_PROG_INCR_RTI));
-    wr.write_byte(0x91); //CRC check, 1 dummy byte
+    if (compress_frames)
+        wr.write_byte(uint8_t(BitstreamCommand::LSC_PROG_INCR_CMP));
+    else
+        wr.write_byte(uint8_t(BitstreamCommand::LSC_PROG_INCR_RTI));
+    wr.write_byte(0x91); //CRC check after every frame, 1 dummy byte
     uint16_t frames = uint16_t(chip.info.num_frames);
     wr.write_byte(uint8_t((frames >> 8) & 0xFF));
     wr.write_byte(uint8_t(frames & 0xFF));
     size_t bytes_per_frame = (chip.info.bits_per_frame + chip.info.pad_bits_after_frame +
                               chip.info.pad_bits_before_frame) / 8U;
+    // if compressed, the frame bytes should be left padded till they are
+    // a multiple of 8 bytes (64 bits)
+    if (compress_frames)
+        bytes_per_frame += (7 - ((bytes_per_frame - 1) % 8));
     unique_ptr<uint8_t[]> frame_bytes = make_unique<uint8_t[]>(bytes_per_frame);
     for (size_t i = 0; i < frames; i++) {
         fill(frame_bytes.get(), frame_bytes.get() + bytes_per_frame, 0x00);
@@ -630,7 +806,10 @@ Bitstream Bitstream::serialise_chip(const Chip &chip, const map<string, string> 
             frame_bytes[(bytes_per_frame - 1) - (ofs / 8)] |=
                     (chip.cram.bit((chip.info.num_frames - 1) - i, j) & 0x01) << (ofs % 8);
         }
-        wr.write_bytes(frame_bytes.get(), bytes_per_frame);
+        if (compress_frames)
+            wr.write_compressed_bytes(frame_bytes.get(), bytes_per_frame, compression_dict.get());
+        else
+            wr.write_bytes(frame_bytes.get(), bytes_per_frame);
         wr.insert_crc16();
         wr.write_byte(0xFF);
     }
