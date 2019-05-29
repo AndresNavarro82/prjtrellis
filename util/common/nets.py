@@ -95,7 +95,7 @@ h_wire_regex = re.compile(r'H(\d{2})([EW])(\d{2})(\d{2})')
 v_wire_regex = re.compile(r'V(\d{2})([NS])(\d{2})(\d{2})')
 
 
-def handle_edge_name(chip_size, tile_pos, wire_pos, netname):
+def handle_edge_name(chip_size, tile_pos, wire_pos, netname, bias):
     """
     At the edges of the device, canonical wire names do not follow normal naming conventions, as they
     would mean the nominal position of the wire would be outside the bounds of the chip. Before we add routing to the
@@ -113,19 +113,23 @@ def handle_edge_name(chip_size, tile_pos, wire_pos, netname):
     vm = v_wire_regex.match(netname)
     if hm:
         if hm.group(1) == "01":
-            if tile_pos[1] == chip_size[1] - 1:
+            if tile_pos[1] == chip_size[1] - (1 - bias) and hm.group(4) == "00":
                 # H01xyy00 --> x+1, H01xyy01
-                assert hm.group(4) == "00"
+                #print(netname)
+                #print(chip_size)
+                #print(tile_pos)
+                #print(wire_pos)
+                # assert hm.group(4) == "00"
                 return "H01{}{}01".format(hm.group(2), hm.group(3)), (wire_pos[0], wire_pos[1] + 1)
         elif hm.group(1) == "02":
-            if tile_pos[1] == 1:
+            if tile_pos[1] == 1 - bias:
                 # H02E0002 --> x-1, H02E0001
                 # H02W0000 --> x-1, H02W00001
                 if hm.group(2) == "E" and wire_pos[1] == 1 and hm.group(4) == "02":
                     return "H02E{}01".format(hm.group(3)), (wire_pos[0], wire_pos[1] - 1)
                 elif hm.group(2) == "W" and wire_pos[1] == 1 and hm.group(4) == "00":
                     return "H02W{}01".format(hm.group(3)), (wire_pos[0], wire_pos[1] - 1)
-            elif tile_pos[1] == (chip_size[1] - 1):
+            elif tile_pos[1] == (chip_size[1] - (1 - bias)):
                 # H02E0000 --> x+1, H02E0001
                 # H02W0002 --> x+1, H02W00001
                 if hm.group(2) == "E" and wire_pos[1] == (chip_size[1] - 1) and hm.group(4) == "00":
@@ -133,7 +137,7 @@ def handle_edge_name(chip_size, tile_pos, wire_pos, netname):
                 elif hm.group(2) == "W" and wire_pos[1] == (chip_size[1] - 1) and hm.group(4) == "02":
                     return "H02W{}01".format(hm.group(3)), (wire_pos[0], wire_pos[1] + 1)
         elif hm.group(1) == "06":
-            if tile_pos[1] <= 5:
+            if tile_pos[1] <= (5 - bias):
                 # x-2, H06W0302 --> x-3, H06W0303
                 # x-2, H06E0004 --> x-3, H06E0003
                 # x-1, H06W0301 --> x-3, H06W0303
@@ -142,7 +146,7 @@ def handle_edge_name(chip_size, tile_pos, wire_pos, netname):
                     return "H06W{}03".format(hm.group(3)), (wire_pos[0], wire_pos[1] - (3 - int(hm.group(4))))
                 elif hm.group(2) == "E":
                     return "H06E{}03".format(hm.group(3)), (wire_pos[0], wire_pos[1] - (int(hm.group(4)) - 3))
-            if tile_pos[1] >= (chip_size[1] - 5):
+            if tile_pos[1] >= (chip_size[1] - (5 - bias)):
                 # x+2, H06W0304 --> x+3, H06W0303
                 # x+2, H06E0302 --> x+3, H06E0303
                 if hm.group(2) == "W":
@@ -251,7 +255,7 @@ def normalise_name(chip_size, tile, wire, bias):
             return "BNK_" + bnk_eclk_re.match(wire).group(1)
     elif netname in ("INRD", "LVDS"):
         return "BNK_" + netname
-    netname, prefix_pos = handle_edge_name(chip_size, tile_pos, prefix_pos, netname)
+    netname, prefix_pos = handle_edge_name(chip_size, tile_pos, prefix_pos, netname, bias)
     if tile_pos == prefix_pos:
         return netname
     else:
